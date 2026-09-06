@@ -37,8 +37,9 @@ jobs:
           # as a download source at all.
           #
           # Fall back to anddea/revanced-patches instead: an actively maintained
-          # fork with real GitHub releases and real .rvp assets. Note this is
-          # the "RVX/Extended" patch set, not a byte-for-byte copy of the
+          # fork with real GitHub releases and real binary assets (now published
+          # as patches-*.mpp since the ecosystem's "Morphe" rebrand). Note this
+          # is the "RVX/Extended" patch set, not a byte-for-byte copy of the
           # official one -- it has additional/reorganized patches -- but it's
           # the closest actively-published source while the original is down.
           #
@@ -54,12 +55,13 @@ jobs:
           }
 
           # pick the first asset whose name looks like "patches-<version>.rvp"
-          # (or .jar for older releases), ignoring cli/integrations/etc assets
+          # (.jar for older releases, .mpp for the Morphe rebrand), ignoring
+          # cli/integrations/etc assets
           pick_patches_asset() {
-            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar)$"))][0].name // empty'
+            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar|mpp)$"))][0].name // empty'
           }
           pick_patches_url() {
-            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar)$"))][0].browser_download_url // empty'
+            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar|mpp)$"))][0].browser_download_url // empty'
           }
 
           # --- 1. Official GitHub repo ------------------------------------
@@ -84,7 +86,7 @@ jobs:
               name=$(echo "$body" | pick_patches_asset)
               dl_url=$(echo "$body" | pick_patches_url)
               if [ -z "$name" ]; then
-                echo "anddea/revanced-patches latest release has no patches-*.rvp/.jar asset:"
+                echo "anddea/revanced-patches latest release has no patches-*.(rvp|jar|mpp) asset:"
                 echo "$body" | jq -r '.assets[].name'
               else
                 echo "Using anddea/revanced-patches fallback (RVX/Extended patch set) since the official repo is unavailable."
@@ -110,7 +112,11 @@ jobs:
 
           wget "$dl_url" -O "$name"
 
-          java -jar patches-json-gen.jar "$name" "docs/patches.json"
+          echo "Running patches-json-gen.jar against $name ..."
+          if ! java -jar patches-json-gen.jar "$name" "docs/patches.json"; then
+            echo "::error::patches-json-gen.jar failed to process '$name'. If this file is a Morphe-format .mpp bundle, it may not be readable by this (ReVanced-era) generator -- see the Java error above for details."
+            exit 1
+          fi
 
       - name: patches
         uses: stefanzweifel/git-auto-commit-action@v5

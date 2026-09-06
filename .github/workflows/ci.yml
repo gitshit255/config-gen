@@ -122,6 +122,6 @@ jobs:
       - name: patches
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          branch: master
+          branch: ${{ github.ref_name }}
           file_pattern: docs/patches.json docs/version
           commit_message: Update patches.json

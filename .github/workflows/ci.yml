@@ -36,87 +36,88 @@ jobs:
           # confirmed by scanning its last 20 releases -- so it can't be used
           # as a download source at all.
           #
-          # Fall back to anddea/revanced-patches instead: an actively maintained
-          # fork with real GitHub releases and real binary assets (now published
-          # as patches-*.mpp since the ecosystem's "Morphe" rebrand). Note this
-          # is the "RVX/Extended" patch set, not a byte-for-byte copy of the
-          # official one -- it has additional/reorganized patches -- but it's
-          # the closest actively-published source while the original is down.
+          # anddea/revanced-patches is an actively maintained fork with real
+          # GitHub releases, but its binary asset is now a Morphe-format .mpp
+          # file (app.morphe.patcher.*), not ReVanced's app.revanced.patcher.*.
+          # patches-json-gen.jar in this repo is compiled against the old
+          # ReVanced library and throws NoClassDefFoundError on that format --
+          # confirmed by actually running it. Rebuilding the generator against
+          # Morphe's library is a much bigger, harder-to-verify change, so
+          # instead: anddea's repo *also* commits a ready-made patches-list.json
+          # to its main branch on every release (used by their own README/wiki
+          # generation), and its per-patch schema (name/description/use/
+          # dependencies/compatiblePackages/options) is identical to what
+          # patches-json-gen.jar produces -- just wrapped in {version, patches}
+          # instead of a bare array. So the fallback below fetches that file
+          # directly and unwraps it, skipping the Java generator (and the
+          # format mismatch) entirely.
+          #
+          # Note this is still the "RVX/Extended" patch set, not a byte-for-byte
+          # copy of the official one -- it has additional/reorganized patches --
+          # but it's the closest actively-published, schema-compatible source
+          # while the original is down.
           #
           # Every branch prints the actual HTTP status/body on failure instead
           # of letting jq fail with an opaque "Cannot index string" error.
-
-          name=""
-          dl_url=""
 
           http_get() {
             # prints "<code>\n<body>" for the given URL
             curl -sS -L -w '\n%{http_code}' "$1"
           }
 
-          # pick the first asset whose name looks like "patches-<version>.rvp"
-          # (.jar for older releases, .mpp for the Morphe rebrand), ignoring
-          # cli/integrations/etc assets
-          pick_patches_asset() {
-            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar|mpp)$"))][0].name // empty'
-          }
-          pick_patches_url() {
-            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar|mpp)$"))][0].browser_download_url // empty'
-          }
+          handled=""
 
-          # --- 1. Official GitHub repo ------------------------------------
+          # --- 1. Official GitHub repo (self-heals once it's back) --------
           resp=$(http_get "https://api.github.com/repos/revanced/revanced-patches/releases/latest")
           code=$(echo "$resp" | tail -n1)
           body=$(echo "$resp" | sed '$d')
           if [ "$code" = "200" ] && echo "$body" | jq -e 'has("assets") and (.assets|length>0)' >/dev/null 2>&1; then
-            name=$(echo "$body" | pick_patches_asset)
-            dl_url=$(echo "$body" | pick_patches_url)
+            name=$(echo "$body" | jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar)$"))][0].name // empty')
+            dl_url=$(echo "$body" | jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar)$"))][0].browser_download_url // empty')
+            if [ -n "$name" ] && [ -n "$dl_url" ]; then
+              version_name="${name%.*}"
+              if [ "$version_name" = "$(cat docs/version)" ]; then exit 0; fi
+
+              wget "$dl_url" -O "$name"
+              echo "Running patches-json-gen.jar against $name ..."
+              if java -jar patches-json-gen.jar "$name" "docs/patches.json"; then
+                echo -n "$version_name" >docs/version
+                handled=1
+              else
+                echo "patches-json-gen.jar failed to process '$name' -- see Java error above. Falling back."
+              fi
+            fi
           else
             echo "Official GitHub source unavailable (HTTP $code):"
             echo "$body" | head -c 500
             echo
           fi
 
-          # --- 2. anddea/revanced-patches fallback ------------------------
-          if [ -z "$name" ]; then
-            resp=$(http_get "https://api.github.com/repos/anddea/revanced-patches/releases/latest")
+          # --- 2. anddea/revanced-patches's committed patches-list.json ----
+          if [ -z "$handled" ]; then
+            resp=$(http_get "https://raw.githubusercontent.com/anddea/revanced-patches/main/patches-list.json")
             code=$(echo "$resp" | tail -n1)
             body=$(echo "$resp" | sed '$d')
-            if [ "$code" = "200" ] && echo "$body" | jq -e 'has("assets") and (.assets|length>0)' >/dev/null 2>&1; then
-              name=$(echo "$body" | pick_patches_asset)
-              dl_url=$(echo "$body" | pick_patches_url)
-              if [ -z "$name" ]; then
-                echo "anddea/revanced-patches latest release has no patches-*.(rvp|jar|mpp) asset:"
-                echo "$body" | jq -r '.assets[].name'
-              else
-                echo "Using anddea/revanced-patches fallback (RVX/Extended patch set) since the official repo is unavailable."
-              fi
+            if [ "$code" = "200" ] && echo "$body" | jq -e 'has("version") and has("patches")' >/dev/null 2>&1; then
+              version=$(echo "$body" | jq -r '.version')
+              if [ "$version" = "$(cat docs/version)" ]; then exit 0; fi
+              echo "Using anddea/revanced-patches patches-list.json fallback (RVX/Extended patch set), version $version"
+              echo "$body" | jq '.patches' >docs/patches.json
+              echo -n "$version" >docs/version
+              handled=1
             else
-              echo "anddea/revanced-patches fallback unavailable (HTTP $code):"
+              echo "anddea/revanced-patches patches-list.json unavailable (HTTP $code):"
               echo "$body" | head -c 500
               echo
             fi
           fi
 
-          if [ -z "$name" ] || [ -z "$dl_url" ]; then
-            echo "::error::Could not resolve a patches asset from the official repo or the anddea fallback. See log above for the raw responses."
+          if [ -z "$handled" ]; then
+            echo "::error::Could not resolve patches from the official repo or the anddea fallback. See log above for the raw responses."
             exit 1
           fi
 
           set -e
-
-          version_name="${name%.*}"
-
-          if [ "$version_name" = "$(cat docs/version)" ]; then exit 0; fi
-          echo -n "$version_name" >docs/version
-
-          wget "$dl_url" -O "$name"
-
-          echo "Running patches-json-gen.jar against $name ..."
-          if ! java -jar patches-json-gen.jar "$name" "docs/patches.json"; then
-            echo "::error::patches-json-gen.jar failed to process '$name'. If this file is a Morphe-format .mpp bundle, it may not be readable by this (ReVanced-era) generator -- see the Java error above for details."
-            exit 1
-          fi
 
       - name: patches
         uses: stefanzweifel/git-auto-commit-action@v5

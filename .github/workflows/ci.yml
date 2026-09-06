@@ -27,15 +27,35 @@ jobs:
 
       - name: Generate JSON
         run: |
-          r=$(curl -s https://api.github.com/repos/revanced/revanced-patches/releases/latest) || exit 1
+          # revanced/revanced-patches on GitHub is currently unavailable (DMCA
+          # takedown, see https://github.com/ReVanced/where-is-revanced-patches),
+          # so try GitHub first and fall back to the official GitLab mirror.
+          name=""
+          dl_url=""
 
-          name=$(echo "$r" | jq -r '.assets | .[0] | .name')
+          gh_resp=$(curl -sf https://api.github.com/repos/revanced/revanced-patches/releases/latest) && \
+            gh_name=$(echo "$gh_resp" | jq -r '.assets[0].name // empty') && \
+            [ -n "$gh_name" ] && {
+              name="$gh_name"
+              dl_url=$(echo "$gh_resp" | jq -r '.assets[0].browser_download_url')
+            }
+
+          if [ -z "$name" ]; then
+            echo "GitHub source unavailable, falling back to GitLab mirror"
+            gl_resp=$(curl -sf "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/releases/permalink/latest") || exit 1
+            name=$(echo "$gl_resp" | jq -r '.assets.links[0].name // empty')
+            dl_url=$(echo "$gl_resp" | jq -r '.assets.links[0].url // empty')
+            if [ -z "$name" ] || [ -z "$dl_url" ]; then
+              echo "Could not resolve a patches asset from either source" >&2
+              exit 1
+            fi
+          fi
+
           version_name="${name%.*}"
 
           if [ "$version_name" = "$(cat docs/version)" ]; then exit 0; fi
           echo -n "$version_name" >docs/version
 
-          dl_url=$(echo "$r" | jq -r '.assets | .[0] | .browser_download_url')
           wget "$dl_url" -O "$name"
 
           java -jar patches-json-gen.jar "$name" "docs/patches.json"

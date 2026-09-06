@@ -27,29 +27,81 @@ jobs:
 
       - name: Generate JSON
         run: |
+          set +e  # we check exit codes / http codes manually below
+
           # revanced/revanced-patches on GitHub is currently unavailable (DMCA
           # takedown, see https://github.com/ReVanced/where-is-revanced-patches),
-          # so try GitHub first and fall back to the official GitLab mirror.
+          # so try GitHub first, then the official GitLab mirror's Releases API,
+          # then fall back to building the asset URL from its latest tag.
+          # Every branch prints the actual HTTP status/body on failure instead
+          # of letting jq fail with an opaque "Cannot index string" error.
+
           name=""
           dl_url=""
 
-          gh_resp=$(curl -sf https://api.github.com/repos/revanced/revanced-patches/releases/latest) && \
-            gh_name=$(echo "$gh_resp" | jq -r '.assets[0].name // empty') && \
-            [ -n "$gh_name" ] && {
-              name="$gh_name"
-              dl_url=$(echo "$gh_resp" | jq -r '.assets[0].browser_download_url')
-            }
+          http_get() {
+            # prints "<code>\n<body>" for the given URL
+            curl -sS -L -w '\n%{http_code}' "$1"
+          }
 
+          # --- 1. GitHub -------------------------------------------------
+          resp=$(http_get "https://api.github.com/repos/revanced/revanced-patches/releases/latest")
+          code=$(echo "$resp" | tail -n1)
+          body=$(echo "$resp" | sed '$d')
+          if [ "$code" = "200" ] && echo "$body" | jq -e 'has("assets") and (.assets|length>0)' >/dev/null 2>&1; then
+            name=$(echo "$body" | jq -r '.assets[0].name')
+            dl_url=$(echo "$body" | jq -r '.assets[0].browser_download_url')
+          else
+            echo "GitHub source unavailable (HTTP $code):"
+            echo "$body" | head -c 500
+            echo
+          fi
+
+          # --- 2. GitLab mirror, Releases API ------------------------------
           if [ -z "$name" ]; then
-            echo "GitHub source unavailable, falling back to GitLab mirror"
-            gl_resp=$(curl -sf "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/releases/permalink/latest") || exit 1
-            name=$(echo "$gl_resp" | jq -r '.assets.links[0].name // empty')
-            dl_url=$(echo "$gl_resp" | jq -r '.assets.links[0].url // empty')
-            if [ -z "$name" ] || [ -z "$dl_url" ]; then
-              echo "Could not resolve a patches asset from either source" >&2
-              exit 1
+            resp=$(http_get "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/releases/permalink/latest")
+            code=$(echo "$resp" | tail -n1)
+            body=$(echo "$resp" | sed '$d')
+            if [ "$code" = "200" ] && echo "$body" | jq -e '.assets.links | length > 0' >/dev/null 2>&1; then
+              name=$(echo "$body" | jq -r '.assets.links[0].name')
+              dl_url=$(echo "$body" | jq -r '.assets.links[0].url')
+            else
+              echo "GitLab releases API unavailable (HTTP $code):"
+              echo "$body" | head -c 500
+              echo
             fi
           fi
+
+          # --- 3. GitLab mirror, derive from latest tag --------------------
+          # Falls back to this if the mirror has tags but no Release objects.
+          if [ -z "$name" ]; then
+            resp=$(http_get "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/repository/tags?order_by=version&per_page=1")
+            code=$(echo "$resp" | tail -n1)
+            body=$(echo "$resp" | sed '$d')
+            tag=$(echo "$body" | jq -r 'if type=="array" then .[0].name else empty end' 2>/dev/null)
+            if [ "$code" = "200" ] && [ -n "$tag" ]; then
+              ver="${tag#v}"
+              candidate="patches-${ver}.rvp"
+              candidate_url="https://gitlab.com/ReVanced/revanced-patches/-/releases/${tag}/downloads/${candidate}"
+              if curl -sSfL -o /dev/null "$candidate_url"; then
+                name="$candidate"
+                dl_url="$candidate_url"
+              else
+                echo "Guessed GitLab asset URL did not resolve: $candidate_url"
+              fi
+            else
+              echo "GitLab tags API unavailable (HTTP $code):"
+              echo "$body" | head -c 500
+              echo
+            fi
+          fi
+
+          if [ -z "$name" ] || [ -z "$dl_url" ]; then
+            echo "::error::Could not resolve a patches asset from GitHub or GitLab. See log above for the raw responses."
+            exit 1
+          fi
+
+          set -e
 
           version_name="${name%.*}"
 

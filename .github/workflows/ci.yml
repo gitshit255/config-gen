@@ -30,11 +30,20 @@ jobs:
           set +e  # we check exit codes / http codes manually below
 
           # revanced/revanced-patches on GitHub is currently unavailable (DMCA
-          # takedown, see https://github.com/ReVanced/where-is-revanced-patches),
-          # so try GitHub first, then fall back to the official GitLab mirror's
-          # Releases API. Every branch prints the actual HTTP status/body on
-          # failure instead of letting jq fail with an opaque
-          # "Cannot index string" error.
+          # takedown, see https://github.com/ReVanced/where-is-revanced-patches).
+          # Its GitLab mirror (gitlab.com/ReVanced/revanced-patches) only carries
+          # source + changelogs -- every release there has zero binary assets,
+          # confirmed by scanning its last 20 releases -- so it can't be used
+          # as a download source at all.
+          #
+          # Fall back to anddea/revanced-patches instead: an actively maintained
+          # fork with real GitHub releases and real .rvp assets. Note this is
+          # the "RVX/Extended" patch set, not a byte-for-byte copy of the
+          # official one -- it has additional/reorganized patches -- but it's
+          # the closest actively-published source while the original is down.
+          #
+          # Every branch prints the actual HTTP status/body on failure instead
+          # of letting jq fail with an opaque "Cannot index string" error.
 
           name=""
           dl_url=""
@@ -44,44 +53,51 @@ jobs:
             curl -sS -L -w '\n%{http_code}' "$1"
           }
 
-          # --- 1. GitHub -------------------------------------------------
+          # pick the first asset whose name looks like "patches-<version>.rvp"
+          # (or .jar for older releases), ignoring cli/integrations/etc assets
+          pick_patches_asset() {
+            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar)$"))][0].name // empty'
+          }
+          pick_patches_url() {
+            jq -r '[.assets[] | select(.name | test("^patches-.*\\.(rvp|jar)$"))][0].browser_download_url // empty'
+          }
+
+          # --- 1. Official GitHub repo ------------------------------------
           resp=$(http_get "https://api.github.com/repos/revanced/revanced-patches/releases/latest")
           code=$(echo "$resp" | tail -n1)
           body=$(echo "$resp" | sed '$d')
           if [ "$code" = "200" ] && echo "$body" | jq -e 'has("assets") and (.assets|length>0)' >/dev/null 2>&1; then
-            name=$(echo "$body" | jq -r '.assets[0].name')
-            dl_url=$(echo "$body" | jq -r '.assets[0].browser_download_url')
+            name=$(echo "$body" | pick_patches_asset)
+            dl_url=$(echo "$body" | pick_patches_url)
           else
-            echo "GitHub source unavailable (HTTP $code):"
+            echo "Official GitHub source unavailable (HTTP $code):"
             echo "$body" | head -c 500
             echo
           fi
 
-          # --- 2. GitLab mirror, Releases API -------------------------------
-          # "permalink/latest" only guarantees the most recently *released_at*
-          # release, not the one with an asset attached (some dev/pre-release
-          # entries on this mirror carry no binary). So instead, scan the most
-          # recent releases and use the first one that actually has an asset.
+          # --- 2. anddea/revanced-patches fallback ------------------------
           if [ -z "$name" ]; then
-            resp=$(http_get "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/releases?per_page=20&order_by=released_at&sort=desc")
+            resp=$(http_get "https://api.github.com/repos/anddea/revanced-patches/releases/latest")
             code=$(echo "$resp" | tail -n1)
             body=$(echo "$resp" | sed '$d')
-            if [ "$code" = "200" ] && echo "$body" | jq -e 'type=="array"' >/dev/null 2>&1; then
-              name=$(echo "$body" | jq -r '[.[] | select((.assets.links // []) | length > 0)][0].assets.links[0].name // empty')
-              dl_url=$(echo "$body" | jq -r '[.[] | select((.assets.links // []) | length > 0)][0].assets.links[0].url // empty')
+            if [ "$code" = "200" ] && echo "$body" | jq -e 'has("assets") and (.assets|length>0)' >/dev/null 2>&1; then
+              name=$(echo "$body" | pick_patches_asset)
+              dl_url=$(echo "$body" | pick_patches_url)
               if [ -z "$name" ]; then
-                echo "GitLab: none of the last 20 releases have an asset attached:"
-                echo "$body" | jq -r '.[] | "\(.tag_name): \(.assets.links | length) asset(s)"'
+                echo "anddea/revanced-patches latest release has no patches-*.rvp/.jar asset:"
+                echo "$body" | jq -r '.assets[].name'
+              else
+                echo "Using anddea/revanced-patches fallback (RVX/Extended patch set) since the official repo is unavailable."
               fi
             else
-              echo "GitLab releases API unavailable (HTTP $code):"
+              echo "anddea/revanced-patches fallback unavailable (HTTP $code):"
               echo "$body" | head -c 500
               echo
             fi
           fi
 
           if [ -z "$name" ] || [ -z "$dl_url" ]; then
-            echo "::error::Could not resolve a patches asset from GitHub or GitLab. See log above for the raw responses."
+            echo "::error::Could not resolve a patches asset from the official repo or the anddea fallback. See log above for the raw responses."
             exit 1
           fi
 

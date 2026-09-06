@@ -31,10 +31,10 @@ jobs:
 
           # revanced/revanced-patches on GitHub is currently unavailable (DMCA
           # takedown, see https://github.com/ReVanced/where-is-revanced-patches),
-          # so try GitHub first, then the official GitLab mirror's Releases API,
-          # then fall back to building the asset URL from its latest tag.
-          # Every branch prints the actual HTTP status/body on failure instead
-          # of letting jq fail with an opaque "Cannot index string" error.
+          # so try GitHub first, then fall back to the official GitLab mirror's
+          # Releases API. Every branch prints the actual HTTP status/body on
+          # failure instead of letting jq fail with an opaque
+          # "Cannot index string" error.
 
           name=""
           dl_url=""
@@ -57,40 +57,24 @@ jobs:
             echo
           fi
 
-          # --- 2. GitLab mirror, Releases API ------------------------------
+          # --- 2. GitLab mirror, Releases API -------------------------------
+          # "permalink/latest" only guarantees the most recently *released_at*
+          # release, not the one with an asset attached (some dev/pre-release
+          # entries on this mirror carry no binary). So instead, scan the most
+          # recent releases and use the first one that actually has an asset.
           if [ -z "$name" ]; then
-            resp=$(http_get "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/releases/permalink/latest")
+            resp=$(http_get "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/releases?per_page=20&order_by=released_at&sort=desc")
             code=$(echo "$resp" | tail -n1)
             body=$(echo "$resp" | sed '$d')
-            if [ "$code" = "200" ] && echo "$body" | jq -e '.assets.links | length > 0' >/dev/null 2>&1; then
-              name=$(echo "$body" | jq -r '.assets.links[0].name')
-              dl_url=$(echo "$body" | jq -r '.assets.links[0].url')
-            else
-              echo "GitLab releases API unavailable (HTTP $code):"
-              echo "$body" | head -c 500
-              echo
-            fi
-          fi
-
-          # --- 3. GitLab mirror, derive from latest tag --------------------
-          # Falls back to this if the mirror has tags but no Release objects.
-          if [ -z "$name" ]; then
-            resp=$(http_get "https://gitlab.com/api/v4/projects/ReVanced%2Frevanced-patches/repository/tags?order_by=version&per_page=1")
-            code=$(echo "$resp" | tail -n1)
-            body=$(echo "$resp" | sed '$d')
-            tag=$(echo "$body" | jq -r 'if type=="array" then .[0].name else empty end' 2>/dev/null)
-            if [ "$code" = "200" ] && [ -n "$tag" ]; then
-              ver="${tag#v}"
-              candidate="patches-${ver}.rvp"
-              candidate_url="https://gitlab.com/ReVanced/revanced-patches/-/releases/${tag}/downloads/${candidate}"
-              if curl -sSfL -o /dev/null "$candidate_url"; then
-                name="$candidate"
-                dl_url="$candidate_url"
-              else
-                echo "Guessed GitLab asset URL did not resolve: $candidate_url"
+            if [ "$code" = "200" ] && echo "$body" | jq -e 'type=="array"' >/dev/null 2>&1; then
+              name=$(echo "$body" | jq -r '[.[] | select((.assets.links // []) | length > 0)][0].assets.links[0].name // empty')
+              dl_url=$(echo "$body" | jq -r '[.[] | select((.assets.links // []) | length > 0)][0].assets.links[0].url // empty')
+              if [ -z "$name" ]; then
+                echo "GitLab: none of the last 20 releases have an asset attached:"
+                echo "$body" | jq -r '.[] | "\(.tag_name): \(.assets.links | length) asset(s)"'
               fi
             else
-              echo "GitLab tags API unavailable (HTTP $code):"
+              echo "GitLab releases API unavailable (HTTP $code):"
               echo "$body" | head -c 500
               echo
             fi
